@@ -33,11 +33,8 @@ jobs:
 
       - name: メール同期スクリプトを実行
         env:
-          # 初回(state.jsonがまだ無い最初の1回)だけ有効。直近何日分に絞るか。
-          SYNC_SINCE_DAYS: "10"
-          # 2回目以降、毎回見る「窓」の日数。1日で十分ですが、
-          # 念のため余裕を持たせるなら2に変更しても構いません。
-          SYNC_WINDOW_DAYS: "1"
+          # 毎回見る「窓」の日数。初回も2回目以降も常にこの日数を使う。
+          SYNC_WINDOW_DAYS: "14"
           BIGLOBE_IMAP_SERVER: ${{ secrets.BIGLOBE_IMAP_SERVER }}
           BIGLOBE_USERNAME: ${{ secrets.BIGLOBE_USERNAME }}
           BIGLOBE_PASSWORD: ${{ secrets.BIGLOBE_PASSWORD }}

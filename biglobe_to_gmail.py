@@ -91,7 +91,10 @@ def get_gmail_service():
 
 def import_to_gmail(service, raw_bytes):
     encoded = base64.urlsafe_b64encode(raw_bytes).decode("ascii")
-    body = {"raw": encoded}
+    # labelIdsを明示的に指定しないと「すべてのメール」にしか入らず、
+    # 受信トレイに表示されない・通知も来ない状態になるため、
+    # INBOX(受信トレイ表示)とUNREAD(未読扱い、通知のトリガーになる)を付与する
+    body = {"raw": encoded, "labelIds": ["INBOX", "UNREAD"]}
     service.users().messages().import_(
         userId="me",
         body=body,

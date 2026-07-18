@@ -4,24 +4,23 @@ biglobeのメールボックスをIMAPで確認し、新着メールをGmail API
 「messages.import」メソッドでGmailに投入するスクリプトです。
 GitHub Actions上で定期実行されることを想定しています。
 
-【取り込み済み判定の方式】
-既読/未読フラグには一切依存しません。また「最後に処理したUID」だけを見る
-単純な方式でもなく、以下の「ウィンドウ方式」を採用しています。
-
-  1. 直近N日分(通常1日)に「サーバーへ到着した」全メールのUID一覧を取得
-     (これはメールのDateヘッダーではなく、サーバー受信日時=internal dateを
-      基準にするため、送信者側の時差表記には影響されません)
+【取り込み済み判定の方式(ウィンドウ方式)】
+既読/未読フラグには一切依存しません。
+  1. 直近WINDOW_DAYS日分(既定14日)に「サーバーへ到着した」全メールの
+     UID一覧を取得する(メールのDateヘッダーではなく、サーバー受信日時=
+     internal dateを基準にするため、送信者側の時差表記には影響されません)
   2. これまでに処理済みのUID一覧(state.json)と突き合わせ、
      「まだ処理していないUID」だけを対象にする
   3. 処理できたUIDを処理済みリストに追加。ウィンドウの外に出た古いUIDは
      リストから削除し、ファイルの肥大化を防ぐ
+  4. 1通の投入に失敗しても他のメールの処理は継続し、失敗したものは
+     次回また自動的に再試行される(ウィンドウが十分広いので取りこぼさない)
 
 必要な環境変数(GitHub Secretsから渡されます):
   BIGLOBE_IMAP_SERVER, BIGLOBE_USERNAME, BIGLOBE_PASSWORD
   GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN, GMAIL_TARGET_ADDRESS
 任意の環境変数:
-  SYNC_SINCE_DAYS   初回(state.jsonがまだ無い時)だけ使う、絞り込み日数
-  SYNC_WINDOW_DAYS  2回目以降、毎回見る「窓」の日数(デフォルト1日)
+  SYNC_WINDOW_DAYS  毎回見る「窓」の日数(既定14日。初回も含め常にこの値を使う)
 """
 
 import os
@@ -47,8 +46,8 @@ GMAIL_CLIENT_SECRET = os.environ["GMAIL_CLIENT_SECRET"]
 GMAIL_REFRESH_TOKEN = os.environ["GMAIL_REFRESH_TOKEN"]
 GMAIL_TARGET_ADDRESS = os.environ.get("GMAIL_TARGET_ADDRESS", "")
 
-SYNC_SINCE_DAYS = int(os.environ.get("SYNC_SINCE_DAYS", "10"))
-SYNC_WINDOW_DAYS = int(os.environ.get("SYNC_WINDOW_DAYS", "1"))
+# 窓の日数。初回か2回目以降かに関わらず、常にこの日数を使う。
+WINDOW_DAYS = int(os.environ.get("SYNC_WINDOW_DAYS", "14"))
 
 
 def load_state():
@@ -70,6 +69,7 @@ def save_state(uidvalidity, processed_uids):
 
 
 def get_uidvalidity(imap):
+    """現在選択中メールボックスのUIDVALIDITY値を取得する"""
     typ, data = imap.response("UIDVALIDITY")
     if data and data[0]:
         return data[0].decode() if isinstance(data[0], bytes) else str(data[0])
@@ -113,24 +113,21 @@ def main():
     state = load_state()
 
     if state is None:
-        print(f"初回実行です。直近{SYNC_SINCE_DAYS}日分を対象にします。")
-        window_days = SYNC_SINCE_DAYS
+        print(f"初回実行です。直近{WINDOW_DAYS}日分を対象にします。")
         processed_uids = set()
     elif state.get("uidvalidity") != uidvalidity:
         print(
             "警告: UIDVALIDITYが変化しています(メールボックスの再構築等)。"
-            f"安全のため直近{SYNC_SINCE_DAYS}日分からやり直します。",
+            "処理済み記録をリセットします。",
             file=sys.stderr,
         )
-        window_days = SYNC_SINCE_DAYS
         processed_uids = set()
     else:
-        window_days = SYNC_WINDOW_DAYS
         processed_uids = state["processed_uids"]
 
     # サーバー受信日時(internal date)基準で、ウィンドウ内の全メールUIDを取得
     since_date = (
-        datetime.date.today() - datetime.timedelta(days=window_days)
+        datetime.date.today() - datetime.timedelta(days=WINDOW_DAYS)
     ).strftime("%d-%b-%Y")
     print(f"検索条件: サーバー受信日時が {since_date} 以降の全メール")
 
@@ -145,7 +142,6 @@ def main():
 
     if not new_uids:
         print("新着メールはありませんでした。")
-        # ウィンドウの外に出た古いUIDを削除してから保存(肥大化防止)
         processed_uids &= uids_in_window
         save_state(uidvalidity, processed_uids)
         imap.logout()
@@ -157,10 +153,21 @@ def main():
     success_count = 0
     for uid in new_uids:
         status, msg_data = imap.uid("fetch", str(uid), "(RFC822)")
-        if status != "OK" or not msg_data or not msg_data[0]:
+        if status != "OK" or not msg_data:
             print(f"UID {uid} の取得に失敗しました。次回また試行します。", file=sys.stderr)
             continue
-        raw = msg_data[0][1]
+
+        # msg_dataの構造はメールによって要素の並びが変わることがあるため、
+        # 実際にbytes型を持つ部分を探して取り出す(決め打ちのインデックス指定はしない)
+        raw = None
+        for part in msg_data:
+            if isinstance(part, tuple) and len(part) >= 2 and isinstance(part[1], (bytes, bytearray)):
+                raw = part[1]
+                break
+        if raw is None:
+            print(f"UID {uid} のメール本体を取得できませんでした。次回また試行します。", file=sys.stderr)
+            continue
+
         try:
             import_to_gmail(service, raw)
             success_count += 1
@@ -174,7 +181,6 @@ def main():
 
     print(f"{success_count}/{len(new_uids)}件の投入が完了しました。")
 
-    # 最終的な状態を保存(ウィンドウ外の古いUIDは削除)
     processed_uids &= uids_in_window
     save_state(uidvalidity, processed_uids)
     imap.logout()

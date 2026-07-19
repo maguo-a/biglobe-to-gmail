@@ -1,10 +1,7 @@
 name: biglobe-to-gmail
 
 on:
-  schedule:
-    # 混雑を避けるため、毎時0分ちょうどではなく2分・7分・12分...にずらして実行
-    - cron: "2-59/5 * * * *"
-  workflow_dispatch: {}  # 手動実行もできるようにしておく(テスト用)
+  workflow_dispatch: {}  # GAS(Google Apps Script)から5分おきに呼び出される
 
 # 前回の実行がまだ終わっていない場合、次の実行は「待つ」形にして
 # state.jsonの上書き競合(コミットの衝突)を防ぐ

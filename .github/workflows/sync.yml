@@ -16,6 +16,9 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    # 通信が固まった場合でも、後続の実行を長時間ブロックしないための上限
+    # (未指定だとGitHubホストのRunnerでは最大360分=6時間まで待ってしまう)
+    timeout-minutes: 15
     steps:
       - name: リポジトリを取得
         uses: actions/checkout@v4
@@ -46,20 +49,32 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           cp state.json /tmp/state.json.new
+          saved=0
           for i in 1 2 3 4 5; do
-            git fetch origin main
+            # 各通信は60秒で打ち切り、固まっても次の試行に進めるようにする
+            if ! timeout 60 git fetch origin main; then
+              echo "fetchに失敗または時間切れ。再試行します ($i回目)"
+              sleep 3
+              continue
+            fi
             git reset --hard origin/main
             cp /tmp/state.json.new state.json
             git add state.json
             if git diff --cached --quiet; then
               echo "変更なし"
+              saved=1
               break
             fi
             git commit -m "Update sync state [skip ci]"
-            if git push origin HEAD:main; then
+            if timeout 60 git push origin HEAD:main; then
               echo "保存成功"
+              saved=1
               break
             fi
-            echo "競合が発生、再試行します ($i回目)"
+            echo "pushに失敗または時間切れ。再試行します ($i回目)"
             sleep $((RANDOM % 5 + 1))
           done
+          if [ "$saved" != 1 ]; then
+            echo "state.jsonを保存できませんでした(次回の実行で重複投入の可能性があります)"
+            exit 1
+          fi

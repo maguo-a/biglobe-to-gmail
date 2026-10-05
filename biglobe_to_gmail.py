@@ -89,6 +89,54 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 
+# Gmail APIが受け付けるヘッダー1件あたりの上限は32768バイト(Google公式の制限)。
+# 余裕を見て、これを超えるヘッダーは投入前に取り除く。
+HEADER_LIMIT_BYTES = 30000
+
+
+def strip_oversized_headers(raw_bytes):
+    """大きすぎるヘッダーだけを取り除く。(新しいraw, [(ヘッダー名, バイト数), ...])を返す。
+
+    例: 受信側が付与するBIMI-Indicatorヘッダーは、ロゴのSVGをbase64化したもので
+    数十KBになることがあり、Gmailの上限を超えて取り込みが拒否される。
+    該当ヘッダーは本文や送信元のDKIM署名の対象ではないため、取り除いても
+    メールの内容は変わらない。ログには名前とサイズだけを出し、内容は出さない。
+    """
+    positions = []
+    crlf = raw_bytes.find(b"\r\n\r\n")
+    if crlf != -1:
+        positions.append((crlf, 2))   # ヘッダー最終行の改行(CRLF)までをヘッダー側に含める
+    lf = raw_bytes.find(b"\n\n")
+    if lf != -1:
+        positions.append((lf, 1))     # 同上(LF)
+    if not positions:
+        return raw_bytes, []
+    idx, nl_len = min(positions)
+    header_block = raw_bytes[: idx + nl_len]
+    rest = raw_bytes[idx + nl_len:]
+
+    # 折り返し行(先頭が空白/タブ)は直前のヘッダーの続きとしてまとめる
+    entries = []
+    for line in header_block.splitlines(keepends=True):
+        if line[:1] in (b" ", b"\t") and entries:
+            entries[-1].append(line)
+        else:
+            entries.append([line])
+
+    kept, removed = [], []
+    for entry in entries:
+        size = sum(len(line) for line in entry)
+        if size > HEADER_LIMIT_BYTES:
+            name = entry[0].split(b":", 1)[0].strip().decode("ascii", "replace")
+            removed.append((name, size))
+        else:
+            kept.append(b"".join(entry))
+
+    if not removed:
+        return raw_bytes, []
+    return b"".join(kept) + rest, removed
+
+
 def import_to_gmail(service, raw_bytes):
     encoded = base64.urlsafe_b64encode(raw_bytes).decode("ascii")
     # labelIdsを明示的に指定しないと「すべてのメール」にしか入らず、
@@ -167,6 +215,11 @@ def main():
         if raw is None:
             print(f"UID {uid} のメール本体を取得できませんでした。次回また試行します。", file=sys.stderr)
             continue
+
+        # ヘッダーが大きすぎるメールは、該当ヘッダーだけを取り除いてから投入する
+        raw, removed = strip_oversized_headers(raw)
+        for name, size in removed:
+            print(f"UID {uid}: 大きすぎるヘッダー {name} ({size}バイト)を除いて投入します。")
 
         try:
             import_to_gmail(service, raw)

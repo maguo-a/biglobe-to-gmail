@@ -29,12 +29,15 @@ import base64
 import sys
 import json
 import datetime
+from email.parser import BytesHeaderParser
+from email.utils import parsedate_to_datetime
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 STATE_FILE = "state.json"
+JST = datetime.timezone(datetime.timedelta(hours=9))
 
 # ===== 環境変数の読み込み =====
 IMAP_SERVER = os.environ["BIGLOBE_IMAP_SERVER"]
@@ -87,6 +90,19 @@ def get_gmail_service():
     )
     creds.refresh(Request())
     return build("gmail", "v1", credentials=creds)
+
+
+def sent_date_text(raw_bytes):
+    """送信日時(Dateヘッダー)をJST表記の文字列にして返す。読み取れなければ「不明」。
+
+    ログは公開されるため、ログに出すのはこの日時だけにとどめ、
+    件名・送信元・本文など内容に関わる情報は扱わない。
+    """
+    try:
+        value = BytesHeaderParser().parsebytes(raw_bytes)["Date"]
+        return parsedate_to_datetime(str(value)).astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
+    except Exception:
+        return "不明"
 
 
 # Gmail APIが受け付けるヘッダー1件あたりの上限は32768バイト(Google公式の制限)。
@@ -216,10 +232,12 @@ def main():
             print(f"UID {uid} のメール本体を取得できませんでした。次回また試行します。", file=sys.stderr)
             continue
 
+        sent = sent_date_text(raw)
+
         # ヘッダーが大きすぎるメールは、該当ヘッダーだけを取り除いてから投入する
         raw, removed = strip_oversized_headers(raw)
         for name, size in removed:
-            print(f"UID {uid}: 大きすぎるヘッダー {name} ({size}バイト)を除いて投入します。")
+            print(f"UID {uid}(送信日時 {sent}): 大きすぎるヘッダー {name} ({size}バイト)を除いて投入します。")
 
         try:
             import_to_gmail(service, raw)
@@ -229,7 +247,7 @@ def main():
             trimmed = processed_uids & uids_in_window
             save_state(uidvalidity, trimmed)
         except Exception as e:
-            print(f"UID {uid} の投入に失敗しました: {e}", file=sys.stderr)
+            print(f"UID {uid}(送信日時 {sent}) の投入に失敗しました: {e}", file=sys.stderr)
             # 失敗しても処理済みにせず、次回また試行する(他のUIDの処理は継続)
 
     print(f"{success_count}/{len(new_uids)}件の投入が完了しました。")

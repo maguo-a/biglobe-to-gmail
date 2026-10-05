@@ -1,7 +1,7 @@
 name: biglobe-to-gmail
 
 on:
-  workflow_dispatch: {}  # GAS(Google Apps Script)から5分おきに呼び出される
+  workflow_dispatch: {}  # GAS(Google Apps Script)から1分おきに呼び出される
 
 # 前回の実行がまだ終わっていない場合、次の実行は「待つ」形にして
 # state.jsonの上書き競合(コミットの衝突)を防ぐ
@@ -15,16 +15,18 @@ permissions:
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    # ubuntu-latestは2026/10/19〜11/19にUbuntu 26.04へ順次移行するため、
+    # 意図しないOS変更を避けて24.04に固定する(26.04の検証後に切り替える)
+    runs-on: ubuntu-24.04
     # 通信が固まった場合でも、後続の実行を長時間ブロックしないための上限
     # (未指定だとGitHubホストのRunnerでは最大360分=6時間まで待ってしまう)
     timeout-minutes: 15
     steps:
       - name: リポジトリを取得
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6   # Node.js 24対応版
 
       - name: Pythonをセットアップ
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6   # Node.js 24対応版
         with:
           python-version: "3.12"
 
